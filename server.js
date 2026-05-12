@@ -185,6 +185,10 @@ function filterBadWords(message) {
   return filtered;
 }
 
+app.get('/', (req, res) => {
+  res.json({ message: 'Anonymous Chat Backend', status: 'running' });
+});
+
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
@@ -193,3 +197,5 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
+
+export default server;
