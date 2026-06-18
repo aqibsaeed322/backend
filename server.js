@@ -19,9 +19,19 @@ const io = new Server(server, {
   transports: ['websocket', 'polling']
 });
 
-// Simple in-memory queue (No Redis needed)
-const waitingQueue = []; // Users waiting for video chat
+// Simple in-memory queues (No Redis needed)
+const videoQueue = []; // Users waiting for video chat
+const textQueue = [];  // Users waiting for text chat
 const activePartners = new Map(); // socketId -> partnerId
+const userModes = new Map();      // socketId -> 'text' | 'video'
+
+// Helper to remove socket from all queues
+function removeFromQueues(socketId) {
+  const vIndex = videoQueue.indexOf(socketId);
+  if (vIndex !== -1) videoQueue.splice(vIndex, 1);
+  const tIndex = textQueue.indexOf(socketId);
+  if (tIndex !== -1) textQueue.splice(tIndex, 1);
+}
 
 io.on('connection', (socket) => {
   console.log(`🟢 User connected: ${socket.id}`);
@@ -30,13 +40,29 @@ io.on('connection', (socket) => {
   // Start Video Chat
   socket.on('video:start', () => {
     console.log(`🎥 Video chat started: ${socket.id}`);
+    userModes.set(socket.id, 'video');
+    removeFromQueues(socket.id);
     
-    // Add to waiting queue
-    waitingQueue.push(socket.id);
-    console.log(`📋 Queue size: ${waitingQueue.length}`);
+    // Add to video queue
+    videoQueue.push(socket.id);
+    console.log(`📋 Video queue size: ${videoQueue.length}`);
     
     // Try to match
-    matchUsers();
+    matchVideoUsers();
+  });
+
+  // Start Text Chat
+  socket.on('text:start', () => {
+    console.log(`📝 Text chat started: ${socket.id}`);
+    userModes.set(socket.id, 'text');
+    removeFromQueues(socket.id);
+    
+    // Add to text queue
+    textQueue.push(socket.id);
+    console.log(`📋 Text queue size: ${textQueue.length}`);
+    
+    // Try to match
+    matchTextUsers();
   });
 
   // WebRTC Signaling
@@ -86,12 +112,26 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Chat message
+  // Chat message (Video chat format)
   socket.on('chat:message', (message) => {
     const partnerId = activePartners.get(socket.id);
     if (partnerId) {
-      console.log(`💬 Message: ${socket.id} -> ${partnerId}`);
+      console.log(`💬 Video Message: ${socket.id} -> ${partnerId}`);
       io.to(partnerId).emit('chat:message', message);
+    }
+  });
+
+  // Message (Text chat format)
+  socket.on('message', (data) => {
+    const partnerId = activePartners.get(socket.id);
+    if (partnerId) {
+      console.log(`💬 Text Message: ${socket.id} -> ${partnerId}`);
+      // Format text message as expected by TextChat.jsx client listener
+      io.to(partnerId).emit('message', {
+        message: data.message,
+        sender: 'stranger',
+        timestamp: Date.now()
+      });
     }
   });
 
@@ -111,6 +151,15 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Heart Spark effect
+  socket.on('spark:heart', () => {
+    const partnerId = activePartners.get(socket.id);
+    if (partnerId) {
+      console.log(`💖 Heart Spark: ${socket.id} -> ${partnerId}`);
+      io.to(partnerId).emit('spark:heart');
+    }
+  });
+
   // Skip / Next
   socket.on('next', () => {
     console.log(`⏭️ Next: ${socket.id}`);
@@ -125,10 +174,36 @@ io.on('connection', (socket) => {
       activePartners.delete(socket.id);
     }
     
-    // Add back to queue
-    waitingQueue.push(socket.id);
-    matchUsers();
+    removeFromQueues(socket.id);
+
+    // Add back to queue based on mode
+    const mode = userModes.get(socket.id);
+    if (mode === 'text') {
+      textQueue.push(socket.id);
+      matchTextUsers();
+    } else {
+      userModes.set(socket.id, 'video'); // Default fallback
+      videoQueue.push(socket.id);
+      matchVideoUsers();
+    }
   });
+
+  // Handle User Reporting (Abuse/Violation Flagging)
+  socket.on('report:user', (data) => {
+    const { reason } = data;
+    const partnerId = activePartners.get(socket.id);
+    console.log(`⚠️ Abuse Report Filed! Reporter: ${socket.id} -> Offender: ${partnerId || 'N/A'}. Reason: ${reason}`);
+    
+    if (partnerId) {
+      const partnerSocket = io.sockets.sockets.get(partnerId);
+      if (partnerSocket) {
+        partnerSocket.emit('partner:disconnected');
+        activePartners.delete(partnerId);
+      }
+      activePartners.delete(socket.id);
+    }
+  });
+
 
   // Disconnect
   socket.on('disconnect', () => {
@@ -144,25 +219,24 @@ io.on('connection', (socket) => {
       activePartners.delete(socket.id);
     }
     
-    // Remove from queue
-    const index = waitingQueue.indexOf(socket.id);
-    if (index !== -1) waitingQueue.splice(index, 1);
+    removeFromQueues(socket.id);
+    userModes.delete(socket.id);
   });
 });
 
-// Match users function
-function matchUsers() {
-  console.log(`🔄 Matching... Queue: [${waitingQueue.join(', ')}]`);
+// Match Video users function
+function matchVideoUsers() {
+  console.log(`🔄 Matching Video... Queue: [${videoQueue.join(', ')}]`);
   
-  while (waitingQueue.length >= 2) {
-    const user1 = waitingQueue.shift();
-    const user2 = waitingQueue.shift();
+  while (videoQueue.length >= 2) {
+    const user1 = videoQueue.shift();
+    const user2 = videoQueue.shift();
     
     const socket1 = io.sockets.sockets.get(user1);
     const socket2 = io.sockets.sockets.get(user2);
     
     if (socket1 && socket2 && socket1.connected && socket2.connected) {
-      console.log(`✅ MATCHED! ${user1} <-> ${user2}`);
+      console.log(`✅ MATCHED VIDEO! ${user1} <-> ${user2}`);
       
       activePartners.set(user1, user2);
       activePartners.set(user2, user1);
@@ -176,9 +250,37 @@ function matchUsers() {
       socket1.emit('partner:location', { country: 'Stranger', flag: '' });
       socket2.emit('partner:location', { country: 'Stranger', flag: '' });
     } else {
-      console.log(`❌ Failed to match`);
-      if (socket1 && socket1.connected) waitingQueue.unshift(user1);
-      if (socket2 && socket2.connected) waitingQueue.unshift(user2);
+      console.log(`❌ Failed to match video`);
+      if (socket1 && socket1.connected) videoQueue.unshift(user1);
+      if (socket2 && socket2.connected) videoQueue.unshift(user2);
+      break;
+    }
+  }
+}
+
+// Match Text users function
+function matchTextUsers() {
+  console.log(`🔄 Matching Text... Queue: [${textQueue.join(', ')}]`);
+  
+  while (textQueue.length >= 2) {
+    const user1 = textQueue.shift();
+    const user2 = textQueue.shift();
+    
+    const socket1 = io.sockets.sockets.get(user1);
+    const socket2 = io.sockets.sockets.get(user2);
+    
+    if (socket1 && socket2 && socket1.connected && socket2.connected) {
+      console.log(`✅ MATCHED TEXT! ${user1} <-> ${user2}`);
+      
+      activePartners.set(user1, user2);
+      activePartners.set(user2, user1);
+      
+      socket1.emit('chat:start', { status: 'connected', partnerId: user2, type: 'text' });
+      socket2.emit('chat:start', { status: 'connected', partnerId: user1, type: 'text' });
+    } else {
+      console.log(`❌ Failed to match text`);
+      if (socket1 && socket1.connected) textQueue.unshift(user1);
+      if (socket2 && socket2.connected) textQueue.unshift(user2);
       break;
     }
   }
@@ -188,7 +290,9 @@ function matchUsers() {
 app.get('/debug', (req, res) => {
   res.json({
     connections: io.engine.clientsCount,
-    waitingQueue: waitingQueue,
+    videoQueue: videoQueue,
+    textQueue: textQueue,
+    userModes: Array.from(userModes.entries()),
     activePartners: Array.from(activePartners.entries())
   });
 });
